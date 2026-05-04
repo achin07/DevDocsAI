@@ -5,9 +5,46 @@
 
 generator client {
   provider = "prisma-client"
-  output   = "../generated/prisma"
+  output   = "../src/generated/prisma"
+  moduleFormat = "cjs"
 }
 
 datasource db {
   provider = "postgresql"
+}
+
+enum DocumentStatus {
+  UPLOADED
+  PROCESSING
+  INDEXED
+  FAILED
+}
+
+model Document{
+  id        String @id @default(uuid())
+  title     String 
+  fileName  String
+  mimeType  String
+  sizeBytes Int
+  status    DocumentStatus @default(UPLOADED)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  chunks    DocumentChunk[] 
+}
+
+model DocumentChunk {
+  id            String   @id @default(uuid())
+  documentId    String
+  content       String
+  chunkIndex    Int
+  tokenEstimate Int?
+  metadata      Json?
+
+  createdAt     DateTime @default(now())
+
+  document      Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@index([documentId])
 }
