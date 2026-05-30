@@ -16,10 +16,10 @@
  */
 
 import * as runtime from "@prisma/client/runtime/client"
-import type * as Prisma from "../models"
-import { type PrismaClient } from "./class"
+import type * as Prisma from "../models.js"
+import { type PrismaClient } from "./class.js"
 
-export type * from '../models'
+export type * from '../models.js'
 
 export type DMMF = typeof runtime.DMMF
 
@@ -612,6 +612,16 @@ export const DocumentChunkScalarFieldEnum = {
   content: 'content',
   chunkIndex: 'chunkIndex',
   tokenEstimate: 'tokenEstimate',
+  charCount: 'charCount',
+  startChar: 'startChar',
+  endChar: 'endChar',
+  pageStart: 'pageStart',
+  pageEnd: 'pageEnd',
+  sectionTitle: 'sectionTitle',
+  strategy: 'strategy',
+  previousChunkIndex: 'previousChunkIndex',
+  nextChunkIndex: 'nextChunkIndex',
+  contextHeader: 'contextHeader',
   metadata: 'metadata',
   createdAt: 'createdAt'
 } as const

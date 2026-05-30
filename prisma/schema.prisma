@@ -16,6 +16,8 @@ datasource db {
 enum DocumentStatus {
   UPLOADED
   PROCESSING
+  CHUNKED
+  EMBEDDING
   INDEXED
   FAILED
 }
@@ -39,12 +41,30 @@ model DocumentChunk {
   documentId    String
   content       String
   chunkIndex    Int
-  tokenEstimate Int?
-  metadata      Json?
 
+  tokenEstimate Int?
+  charCount     Int?
+
+  startChar     Int?
+  endChar       Int?
+
+  pageStart     Int?
+  pageEnd       Int?
+
+  sectionTitle  String?
+  strategy      String?
+
+  previousChunkIndex Int?
+  nextChunkIndex     Int?
+
+  contextHeader String?
+
+  metadata      Json?
   createdAt     DateTime @default(now())
 
   document      Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
 
   @@index([documentId])
+  @@index([documentId, chunkIndex])
+  @@index([documentId, pageStart])
 }

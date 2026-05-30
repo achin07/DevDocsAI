@@ -17,8 +17,8 @@
 
 import * as runtime from "@prisma/client/runtime/index-browser"
 
-export type * from '../models'
-export type * from './prismaNamespace'
+export type * from '../models.js'
+export type * from './prismaNamespace.js'
 
 export const Decimal = runtime.Decimal
 
@@ -91,6 +91,16 @@ export const DocumentChunkScalarFieldEnum = {
   content: 'content',
   chunkIndex: 'chunkIndex',
   tokenEstimate: 'tokenEstimate',
+  charCount: 'charCount',
+  startChar: 'startChar',
+  endChar: 'endChar',
+  pageStart: 'pageStart',
+  pageEnd: 'pageEnd',
+  sectionTitle: 'sectionTitle',
+  strategy: 'strategy',
+  previousChunkIndex: 'previousChunkIndex',
+  nextChunkIndex: 'nextChunkIndex',
+  contextHeader: 'contextHeader',
   metadata: 'metadata',
   createdAt: 'createdAt'
 } as const

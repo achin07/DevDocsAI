@@ -52,7 +52,11 @@ export class DocumentsService {
             },
         });
 
-        const chunks = chunkText(text);
+        const chunks = chunkText(text, {
+            sourceName: file.originalname,
+            maxChars: 1200,
+            overlapChars: 150,
+        });
 
         if (chunks.length === 0) {
             await this.prisma.document.update({
@@ -68,7 +72,24 @@ export class DocumentsService {
                 documentId: document.id,
                 content: chunk.content,
                 chunkIndex: chunk.chunkIndex,
+
                 tokenEstimate: chunk.tokenEstimate,
+                charCount: chunk.charCount,
+
+                startChar: chunk.startChar,
+                endChar: chunk.endChar,
+
+                pageStart: chunk.pageStart,
+                pageEnd: chunk.pageEnd,
+
+                sectionTitle: chunk.sectionTitle,
+                strategy: chunk.strategy,
+
+                previousChunkIndex: chunk.previousChunkIndex,
+                nextChunkIndex: chunk.nextChunkIndex,
+
+                contextHeader: chunk.contextHeader,
+
                 metadata: chunk.metadata,
             })),
         });
@@ -95,6 +116,14 @@ export class DocumentsService {
                 id: chunk.id,
                 chunkIndex: chunk.chunkIndex,
                 tokenEstimate: chunk.tokenEstimate,
+                charCount: chunk.charCount,
+                sectionTitle: chunk.sectionTitle,
+                strategy: chunk.strategy,
+                startChar: chunk.startChar,
+                endChar: chunk.endChar,
+                previousChunkIndex: chunk.previousChunkIndex,
+                nextChunkIndex: chunk.nextChunkIndex,
+                contextHeader: chunk.contextHeader,
                 preview: chunk.content.slice(0, 200),
             })),
         };
