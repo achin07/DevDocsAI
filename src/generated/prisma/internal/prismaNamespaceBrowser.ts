@@ -102,6 +102,10 @@ export const DocumentChunkScalarFieldEnum = {
   nextChunkIndex: 'nextChunkIndex',
   contextHeader: 'contextHeader',
   metadata: 'metadata',
+  embeddingModel: 'embeddingModel',
+  embeddingDimension: 'embeddingDimension',
+  embeddingStatus: 'embeddingStatus',
+  embeddedAt: 'embeddedAt',
   createdAt: 'createdAt'
 } as const
 

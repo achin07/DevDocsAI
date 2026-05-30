@@ -37,34 +37,36 @@ model Document{
 }
 
 model DocumentChunk {
-  id            String   @id @default(uuid())
-  documentId    String
-  content       String
-  chunkIndex    Int
+  id              String   @id @default(uuid())
+  documentId      String
+  content         String
+  chunkIndex      Int
 
-  tokenEstimate Int?
-  charCount     Int?
+  tokenEstimate   Int?
+  charCount       Int?
+  startChar       Int?
+  endChar         Int?
 
-  startChar     Int?
-  endChar       Int?
+  pageStart       Int?
+  pageEnd         Int?
 
-  pageStart     Int?
-  pageEnd       Int?
-
-  sectionTitle  String?
-  strategy      String?
+  sectionTitle    String?
+  strategy        String?
 
   previousChunkIndex Int?
   nextChunkIndex     Int?
 
-  contextHeader String?
+  contextHeader   String?
+  metadata        Json?
 
-  metadata      Json?
-  createdAt     DateTime @default(now())
+  embeddingModel      String?
+  embeddingDimension  Int?
+  embeddingStatus     String   @default("PENDING")
+  embeddedAt          DateTime?
 
-  document      Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  createdAt       DateTime @default(now())
+
+  document        Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
 
   @@index([documentId])
-  @@index([documentId, chunkIndex])
-  @@index([documentId, pageStart])
 }

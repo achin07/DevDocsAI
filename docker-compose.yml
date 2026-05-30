@@ -11,6 +11,16 @@ services:
       POSTGRES_DB: devdocs_ai
     volumes:
       - postgres_data:/var/lib/postgresql/data
+  
+  embedding-service:
+    build:
+      context: ./embedding-service
+    container_name: devdocs-embedding-service
+    restart: always
+    ports:
+      - "8001:8001"
+    environment:
+      - PYTHONUNBUFFERED=1
 
 volumes:
   postgres_data:

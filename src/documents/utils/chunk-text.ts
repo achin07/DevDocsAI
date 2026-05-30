@@ -1,5 +1,11 @@
 export type GitaSectionType = 'TEXT' | 'SYNONYMS' | 'TRANSLATION' | 'PURPORT';
 
+export type DocumentType = 'gita-structured' | 'generic';
+
+export type ChunkStrategy =
+  | 'gita-hybrid-structured-window-semantic-ready'
+  | 'generic-paragraph-window-semantic-ready';
+
 export interface TextChunk {
   content: string;
   chunkIndex: number;
@@ -15,28 +21,65 @@ export interface TextChunk {
 
   sectionTitle?: string;
 
-  strategy: string;
+  strategy: ChunkStrategy;
 
   previousChunkIndex?: number;
   nextChunkIndex?: number;
 
+  /**
+   * Human-readable context that can be prepended before embedding or before
+   * sending retrieved chunks to the LLM.
+   *
+   * Important:
+   * - Keep the raw `content` clean.
+   * - Keep retrieval/citation context here.
+   */
   contextHeader: string;
 
   metadata: {
-    strategy: string;
+    strategy: ChunkStrategy;
     sourceName?: string;
+
     maxChars: number;
     overlapChars: number;
 
-    documentType: 'gita-structured' | 'generic';
+    documentType: DocumentType;
     sectionType?: GitaSectionType;
 
     chapterNumber?: number;
     chapterTitle?: string;
     textNumber?: string;
 
+    /**
+     * These fields are for the next phase: embeddings + semantic retrieval.
+     *
+     * semanticGroupId:
+     *   Stable logical group, e.g. gita-ch1-text1-purport.
+     *   Useful for joining neighboring chunks from the same verse/purport.
+     *
+     * semanticAnchor:
+     *   Short natural-language label describing what the chunk is about.
+     *   Useful for debugging retrieved chunks.
+     *
+     * embeddingText:
+     *   Text that should be embedded later.
+     *   It includes metadata context + content, because embedding only raw
+     *   paragraph text often loses chapter/text identity.
+     */
+    semanticGroupId?: string;
+    semanticAnchor?: string;
+    embeddingText?: string;
+
     includeInSemanticIndex?: boolean;
     searchPriority?: 'low' | 'medium' | 'high';
+
+    /**
+     * Tells later retrieval whether this chunk was produced from:
+     * - a natural document boundary, e.g. TRANSLATION
+     * - a paragraph/window split, e.g. PURPORT Part 2
+     */
+    chunkBoundaryType?: 'section' | 'window';
+    partNumber?: number;
   };
 }
 
@@ -47,13 +90,13 @@ type ChunkOptions = {
 
   /**
    * For Gita-style PDFs:
-   * Sanskrit/original text is often not useful for English semantic search,
-   * so default false.
+   * Sanskrit/original text is often noisy after PDF extraction, so default false.
    */
   includeOriginalText?: boolean;
 
   /**
-   * Synonyms are useful for word-meaning queries, so default true.
+   * Synonyms can be useful for word-meaning queries.
+   * For first RAG version, you can set this false if retrieval becomes noisy.
    */
   includeSynonyms?: boolean;
 };
@@ -74,16 +117,87 @@ type ActiveContext = {
   textNumber?: string;
 };
 
+type SplitPart = {
+  content: string;
+  startChar: number;
+  endChar: number;
+  partNumber?: number;
+  chunkBoundaryType: 'section' | 'window';
+};
+
+const DEFAULT_MAX_CHARS = 1200;
+const DEFAULT_OVERLAP_CHARS = 150;
+
 const estimateTokens = (text: string): number => {
+  /**
+   * Rough estimate only.
+   * Good enough for chunk metadata, not for billing/token-limit enforcement.
+   */
   return Math.ceil(text.length / 4);
 };
 
-const normalizeText = (text: string): string => {
+const removePdfNoise = (text: string): string => {
+  /**
+   * This removes repeated footer/header noise from the Bhagavad-gita PDF.
+   * Keep this conservative. Aggressive cleaning can accidentally delete content.
+   */
   return text
+    .replace(/Copyright © 1998 The Bhaktivedanta Book Trust Int'?l\. All Rights Reserved\./gi, '')
+    .replace(/Bhaktivedanta Book Trust Int'?l\. All Rights Reserved\./gi, '');
+};
+
+const normalizeText = (text: string): string => {
+  return removePdfNoise(text)
     .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+
+    /**
+     * Many PDFs extract visual spacing as many spaces.
+     * This turns "Bhagavad-gétä   is   the" into "Bhagavad-gétä is the".
+     */
+    .replace(/[ \t]{2,}/g, ' ')
+
+    /**
+     * Remove spaces before newline and collapse too many blank lines.
+     */
     .replace(/[ \t]+\n/g, '\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
+};
+
+const cleanBlockContent = (text: string): string => {
+  return text
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+};
+
+const slugify = (value: string): string => {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/gi, '-')
+    .replace(/^-+|-+$/g, '');
+};
+
+const buildSemanticGroupId = (params: {
+  documentType: DocumentType;
+  chapterNumber?: number;
+  textNumber?: string;
+  sectionType?: GitaSectionType;
+  sectionTitle?: string;
+  chunkIndex: number;
+}): string => {
+  if (params.documentType === 'gita-structured') {
+    const chapter = params.chapterNumber ? `ch${params.chapterNumber}` : 'ch-unknown';
+    const text = params.textNumber ? `text${slugify(params.textNumber)}` : 'text-unknown';
+    const section = params.sectionType ? params.sectionType.toLowerCase() : 'section-unknown';
+
+    return `gita-${chapter}-${text}-${section}`;
+  }
+
+  const section = params.sectionTitle ? slugify(params.sectionTitle) : 'generic';
+  return `generic-${section}-chunk${params.chunkIndex}`;
 };
 
 const buildContextHeader = (params: {
@@ -96,6 +210,7 @@ const buildContextHeader = (params: {
   textNumber?: string;
   sectionType?: GitaSectionType;
   sectionTitle?: string;
+  partNumber?: number;
 }): string => {
   const lines: string[] = [];
 
@@ -117,6 +232,10 @@ const buildContextHeader = (params: {
 
   if (params.sectionType) {
     lines.push(`Section: ${params.sectionType}`);
+  }
+
+  if (params.partNumber) {
+    lines.push(`Part: ${params.partNumber}`);
   }
 
   if (params.sectionTitle) {
@@ -143,38 +262,42 @@ const findGitaMarkers = (text: string): ParsedMarker[] => {
   /**
    * Supported examples:
    *
+   * - CHAPTER 1 -
+   * CHAPTER 1 - Observing the Armies
    * CHAPTER 1- 'OBSERVING THE ARMIES'
-   * CHAPTER 2 - Contents of the Gita Summarized
-   * TEXT-1
    * TEXT 1
+   * TEXT-1
    * TEXTS 1-2
    * SYNONYMS
    * TRANSLATION
    * PURPORT
+   *
+   * NOTE:
+   * The marker must be alone on a line. This avoids matching normal prose.
    */
   const markerRegex =
-    /^(?:\s*)(CHAPTER\s+(\d+)\s*[-–—]\s*['"“”]?(.+?)['"“”]?\s*|TEXTS?\s*[-–—]?\s*(\d+(?:\s*[-–—]\s*\d+)?)\s*|SYNONYMS\s*|TRANSLATION\s*|PURPORT\s*)$/gim;
+    /^\s*(?:-?\s*CHAPTER\s+(\d+)\s*-?\s*(?:[-–—]\s*['"“”]?(.+?)['"“”]?)?\s*|TEXTS?\s*[-–—]?\s*(\d+(?:\s*[-–—]\s*\d+)?)\s*|SYNONYMS\s*|TRANSLATION\s*|PURPORT\s*)$/gim;
 
   let match: RegExpExecArray | null;
 
   while ((match = markerRegex.exec(text)) !== null) {
-    const fullMarker = match[1].trim();
+    const fullMarker = match[0].trim();
     const markerUpper = fullMarker.toUpperCase();
 
-    if (markerUpper.startsWith('CHAPTER')) {
+    if (markerUpper.includes('CHAPTER')) {
       markers.push({
         type: 'CHAPTER',
         index: match.index,
         endIndex: markerRegex.lastIndex,
-        chapterNumber: Number(match[2]),
-        chapterTitle: match[3]?.trim(),
+        chapterNumber: Number(match[1]),
+        chapterTitle: match[2]?.trim(),
       });
 
       continue;
     }
 
     if (markerUpper.startsWith('TEXT')) {
-      const normalizedTextNumber = match[4]?.replace(/\s+/g, '').replace(/[–—]/g, '-');
+      const normalizedTextNumber = match[3]?.replace(/\s+/g, '').replace(/[–—]/g, '-');
 
       markers.push({
         type: 'TEXT',
@@ -187,31 +310,17 @@ const findGitaMarkers = (text: string): ParsedMarker[] => {
     }
 
     if (markerUpper === 'SYNONYMS') {
-      markers.push({
-        type: 'SYNONYMS',
-        index: match.index,
-        endIndex: markerRegex.lastIndex,
-      });
-
+      markers.push({ type: 'SYNONYMS', index: match.index, endIndex: markerRegex.lastIndex });
       continue;
     }
 
     if (markerUpper === 'TRANSLATION') {
-      markers.push({
-        type: 'TRANSLATION',
-        index: match.index,
-        endIndex: markerRegex.lastIndex,
-      });
-
+      markers.push({ type: 'TRANSLATION', index: match.index, endIndex: markerRegex.lastIndex });
       continue;
     }
 
     if (markerUpper === 'PURPORT') {
-      markers.push({
-        type: 'PURPORT',
-        index: match.index,
-        endIndex: markerRegex.lastIndex,
-      });
+      markers.push({ type: 'PURPORT', index: match.index, endIndex: markerRegex.lastIndex });
     }
   }
 
@@ -233,20 +342,20 @@ const splitLongContentParagraphAware = (params: {
   absoluteStartChar: number;
   maxChars: number;
   overlapChars: number;
-}): Array<{
-  content: string;
-  startChar: number;
-  endChar: number;
-}> => {
+}): SplitPart[] => {
+  /**
+   * Window strategy:
+   * - Try to split near paragraph boundaries.
+   * - Fall back to a hard maxChars split if no good paragraph boundary exists.
+   * - Use small overlap so retrieval does not lose continuity.
+   *
+   * This is used only when a natural section is too large, mainly PURPORT.
+   */
   const { content, absoluteStartChar, maxChars, overlapChars } = params;
-
-  const parts: Array<{
-    content: string;
-    startChar: number;
-    endChar: number;
-  }> = [];
+  const parts: SplitPart[] = [];
 
   let localStart = 0;
+  let partNumber = 1;
 
   while (localStart < content.length) {
     let localEnd = Math.min(localStart + maxChars, content.length);
@@ -257,32 +366,52 @@ const splitLongContentParagraphAware = (params: {
       localEnd = paragraphBreak;
     }
 
-    const partContent = content.slice(localStart, localEnd).trim();
+    const rawSlice = content.slice(localStart, localEnd);
+    const partContent = rawSlice.trim();
 
     if (partContent.length > 0) {
-      const leadingWhitespace = content
-        .slice(localStart, localEnd)
-        .length - content.slice(localStart, localEnd).trimStart().length;
-
-      const trailingWhitespace = content
-        .slice(localStart, localEnd)
-        .length - content.slice(localStart, localEnd).trimEnd().length;
+      const leadingWhitespace = rawSlice.length - rawSlice.trimStart().length;
+      const trailingWhitespace = rawSlice.length - rawSlice.trimEnd().length;
 
       parts.push({
         content: partContent,
         startChar: absoluteStartChar + localStart + leadingWhitespace,
         endChar: absoluteStartChar + localEnd - trailingWhitespace,
+        partNumber,
+        chunkBoundaryType: 'window',
       });
+
+      partNumber++;
     }
 
     if (localEnd >= content.length) {
       break;
     }
 
-    localStart = Math.max(0, localEnd - overlapChars);
+    /**
+     * Guard against invalid overlap values creating infinite loops.
+     */
+    const safeOverlap = Math.min(overlapChars, Math.floor(maxChars / 2));
+    localStart = Math.max(0, localEnd - safeOverlap);
   }
 
   return parts;
+};
+
+const buildEmbeddingText = (params: {
+  contextHeader: string;
+  content: string;
+  sectionType?: GitaSectionType;
+}): string => {
+  /**
+   * This is the text you should embed later.
+   *
+   * Why include contextHeader?
+   * A chunk like "He was confused..." is weak by itself.
+   * "Chapter 1 | Text 1 | Purport | He was confused..." embeds with much
+   * better identity.
+   */
+  return `${params.contextHeader}\n\n${params.content}`;
 };
 
 const createGitaChunk = (params: {
@@ -299,9 +428,12 @@ const createGitaChunk = (params: {
   context: ActiveContext;
   sectionType: GitaSectionType;
 
-  strategy: string;
+  strategy: ChunkStrategy;
   includeInSemanticIndex: boolean;
   searchPriority: 'low' | 'medium' | 'high';
+
+  chunkBoundaryType: 'section' | 'window';
+  partNumber?: number;
 }): TextChunk => {
   const sectionTitleParts: string[] = [];
 
@@ -319,6 +451,10 @@ const createGitaChunk = (params: {
 
   sectionTitleParts.push(params.sectionType);
 
+  if (params.partNumber) {
+    sectionTitleParts.push(`Part ${params.partNumber}`);
+  }
+
   const sectionTitle = sectionTitleParts.join(' | ');
 
   const contextHeader = buildContextHeader({
@@ -331,13 +467,38 @@ const createGitaChunk = (params: {
     textNumber: params.context.textNumber,
     sectionType: params.sectionType,
     sectionTitle,
+    partNumber: params.partNumber,
+  });
+
+  const semanticGroupId = buildSemanticGroupId({
+    documentType: 'gita-structured',
+    chapterNumber: params.context.chapterNumber,
+    textNumber: params.context.textNumber,
+    sectionType: params.sectionType,
+    sectionTitle,
+    chunkIndex: params.chunkIndex,
+  });
+
+  const semanticAnchor = [
+    params.context.chapterNumber ? `Chapter ${params.context.chapterNumber}` : undefined,
+    params.context.textNumber ? `Text ${params.context.textNumber}` : undefined,
+    params.sectionType,
+    params.partNumber ? `Part ${params.partNumber}` : undefined,
+  ]
+    .filter(Boolean)
+    .join(' | ');
+
+  const embeddingText = buildEmbeddingText({
+    contextHeader,
+    content: params.content,
+    sectionType: params.sectionType,
   });
 
   return {
     content: params.content,
     chunkIndex: params.chunkIndex,
 
-    tokenEstimate: estimateTokens(`${contextHeader}\n\n${params.content}`),
+    tokenEstimate: estimateTokens(embeddingText),
     charCount: params.content.length,
 
     startChar: params.startChar,
@@ -361,10 +522,56 @@ const createGitaChunk = (params: {
       chapterTitle: params.context.chapterTitle,
       textNumber: params.context.textNumber,
 
+      semanticGroupId,
+      semanticAnchor,
+      embeddingText,
+
       includeInSemanticIndex: params.includeInSemanticIndex,
       searchPriority: params.searchPriority,
+
+      chunkBoundaryType: params.chunkBoundaryType,
+      partNumber: params.partNumber,
     },
   };
+};
+
+const shouldKeepGitaSection = (
+  sectionType: GitaSectionType,
+  options: Pick<ChunkOptions, 'includeOriginalText' | 'includeSynonyms'>,
+): boolean => {
+  /**
+   * V1 RAG decision:
+   * - TRANSLATION and PURPORT are the main semantic-search content.
+   * - SYNONYMS are optional because they may help word-meaning questions,
+   *   but can also pollute retrieval.
+   * - TEXT/original Sanskrit is default false because PDF extraction is noisy.
+   */
+  return (
+    sectionType === 'TRANSLATION' ||
+    sectionType === 'PURPORT' ||
+    (sectionType === 'SYNONYMS' && options.includeSynonyms !== false) ||
+    (sectionType === 'TEXT' && options.includeOriginalText === true)
+  );
+};
+
+const getSectionSearchConfig = (
+  sectionType: GitaSectionType,
+): {
+  includeInSemanticIndex: boolean;
+  searchPriority: 'low' | 'medium' | 'high';
+} => {
+  switch (sectionType) {
+    case 'TRANSLATION':
+    case 'PURPORT':
+      return { includeInSemanticIndex: true, searchPriority: 'high' };
+
+    case 'SYNONYMS':
+      return { includeInSemanticIndex: true, searchPriority: 'medium' };
+
+    case 'TEXT':
+    default:
+      return { includeInSemanticIndex: false, searchPriority: 'low' };
+  }
 };
 
 const chunkGitaStructuredText = (
@@ -379,7 +586,7 @@ const chunkGitaStructuredText = (
   }
 
   const chunks: TextChunk[] = [];
-  const strategy = 'gita-contextual-section-aware';
+  const strategy: ChunkStrategy = 'gita-hybrid-structured-window-semantic-ready';
 
   let context: ActiveContext = {};
   let chunkIndex = 0;
@@ -409,58 +616,51 @@ const chunkGitaStructuredText = (
 
     const rawBlockEnd = nextMarker ? nextMarker.index : text.length;
     const rawBlock = text.slice(marker.endIndex, rawBlockEnd);
+    const cleanedBlock = cleanBlockContent(rawBlock);
 
-    const trimmedBlock = rawBlock.trim();
-
-    if (!trimmedBlock) {
+    if (!cleanedBlock) {
       continue;
     }
 
     const leadingWhitespaceLength = rawBlock.length - rawBlock.trimStart().length;
     const absoluteStartChar = marker.endIndex + leadingWhitespaceLength;
 
-    const shouldKeepSection =
-      sectionType === 'TRANSLATION' ||
-      sectionType === 'PURPORT' ||
-      (sectionType === 'SYNONYMS' && options.includeSynonyms !== false) ||
-      (sectionType === 'TEXT' && options.includeOriginalText === true);
-
-    if (!shouldKeepSection) {
+    if (!shouldKeepGitaSection(sectionType, options)) {
       continue;
     }
 
-    const includeInSemanticIndex =
-      sectionType === 'TRANSLATION' ||
-      sectionType === 'PURPORT' ||
-      sectionType === 'SYNONYMS';
-
-    const searchPriority =
-      sectionType === 'TRANSLATION' || sectionType === 'PURPORT'
-        ? 'high'
-        : sectionType === 'SYNONYMS'
-          ? 'medium'
-          : 'low';
+    const { includeInSemanticIndex, searchPriority } = getSectionSearchConfig(sectionType);
 
     /**
-     * TRANSLATION is usually short and should stay as one chunk.
-     * SYNONYMS is useful as one separate glossary-like chunk unless too long.
-     * PURPORT can be long, so split it paragraph-aware.
+     * Hybrid chunking policy:
+     *
+     * 1. Structured:
+     *    Split by CHAPTER / TEXT / TRANSLATION / PURPORT markers.
+     *
+     * 2. Window:
+     *    If a section is too long, split paragraph-aware with overlap.
+     *    This is mainly for PURPORT.
+     *
+     * 3. Semantic-ready:
+     *    Each chunk gets semanticGroupId + semanticAnchor + embeddingText.
+     *    The real embedding-based semantic search comes in the next phase.
      */
-    const shouldSplit =
-      sectionType === 'PURPORT' || trimmedBlock.length > options.maxChars;
+    const shouldWindowSplit =
+      sectionType === 'PURPORT' || cleanedBlock.length > options.maxChars;
 
-    const blockParts = shouldSplit
+    const blockParts: SplitPart[] = shouldWindowSplit
       ? splitLongContentParagraphAware({
-          content: trimmedBlock,
+          content: cleanedBlock,
           absoluteStartChar,
           maxChars: options.maxChars,
           overlapChars: options.overlapChars,
         })
       : [
           {
-            content: trimmedBlock,
+            content: cleanedBlock,
             startChar: absoluteStartChar,
-            endChar: absoluteStartChar + trimmedBlock.length,
+            endChar: absoluteStartChar + cleanedBlock.length,
+            chunkBoundaryType: 'section',
           },
         ];
 
@@ -483,6 +683,9 @@ const chunkGitaStructuredText = (
           strategy,
           includeInSemanticIndex,
           searchPriority,
+
+          chunkBoundaryType: part.chunkBoundaryType,
+          partNumber: part.partNumber,
         }),
       );
 
@@ -520,7 +723,7 @@ const chunkGenericText = (
     Pick<ChunkOptions, 'sourceName'>,
 ): TextChunk[] => {
   const chunks: TextChunk[] = [];
-  const strategy = 'contextual-paragraph-aware-fixed-size';
+  const strategy: ChunkStrategy = 'generic-paragraph-window-semantic-ready';
 
   let start = 0;
   let chunkIndex = 0;
@@ -534,7 +737,7 @@ const chunkGenericText = (
       end = paragraphBreak;
     }
 
-    const content = text.slice(start, end).trim();
+    const content = cleanBlockContent(text.slice(start, end));
 
     if (content.length > 0) {
       const sectionTitle = findSectionTitle(text, start);
@@ -547,11 +750,24 @@ const chunkGenericText = (
         sectionTitle,
       });
 
+      const semanticGroupId = buildSemanticGroupId({
+        documentType: 'generic',
+        sectionTitle,
+        chunkIndex,
+      });
+
+      const semanticAnchor = sectionTitle ?? `Generic chunk ${chunkIndex}`;
+
+      const embeddingText = buildEmbeddingText({
+        contextHeader,
+        content,
+      });
+
       chunks.push({
         content,
         chunkIndex,
 
-        tokenEstimate: estimateTokens(`${contextHeader}\n\n${content}`),
+        tokenEstimate: estimateTokens(embeddingText),
         charCount: content.length,
 
         startChar: start,
@@ -570,8 +786,14 @@ const chunkGenericText = (
 
           documentType: 'generic',
 
+          semanticGroupId,
+          semanticAnchor,
+          embeddingText,
+
           includeInSemanticIndex: true,
           searchPriority: 'medium',
+
+          chunkBoundaryType: 'window',
         },
       });
 
@@ -582,15 +804,16 @@ const chunkGenericText = (
       break;
     }
 
-    start = Math.max(0, end - options.overlapChars);
+    const safeOverlap = Math.min(options.overlapChars, Math.floor(options.maxChars / 2));
+    start = Math.max(0, end - safeOverlap);
   }
 
   return addNeighbourIndexes(chunks);
 };
 
 export function chunkText(text: string, options?: ChunkOptions): TextChunk[] {
-  const maxChars = options?.maxChars ?? 1200;
-  const overlapChars = options?.overlapChars ?? 150;
+  const maxChars = options?.maxChars ?? DEFAULT_MAX_CHARS;
+  const overlapChars = options?.overlapChars ?? DEFAULT_OVERLAP_CHARS;
 
   const normalizedText = normalizeText(text);
 
@@ -606,6 +829,10 @@ export function chunkText(text: string, options?: ChunkOptions): TextChunk[] {
     includeSynonyms: options?.includeSynonyms ?? true,
   };
 
+  /**
+   * Try domain-specific Gita chunking first.
+   * If the document does not have enough Gita markers, fall back to generic chunking.
+   */
   const gitaChunks = chunkGitaStructuredText(normalizedText, normalizedOptions);
 
   if (gitaChunks.length > 0) {
